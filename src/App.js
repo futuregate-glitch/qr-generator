@@ -149,16 +149,20 @@ const QRCodeGenerator = () => {
     try {
       qrContainerRef.current.innerHTML = '';
 
+      // Choose error correction based on data length
+      // Shorter data = Q (supports bigger logo), longer data = L (keeps QR readable)
+      const ecLevel = text.length > 80 ? 'L' : 'Q';
+
       // Generate QR using QRious to get module data
       const hiddenCanvas = document.createElement('canvas');
-      const qr = new window.QRious({
+      new window.QRious({
         element: hiddenCanvas,
         value: text,
         size: 100,
         padding: 0,
         background: 'white',
         foreground: 'black',
-        level: 'Q'
+        level: ecLevel
       });
 
       // Read pixel data to extract module grid
@@ -167,35 +171,33 @@ const QRCodeGenerator = () => {
       const canvasW = hiddenCanvas.width;
 
       // Detect module count by finding the first dark run length in top row
-      // QRious with padding:0 means modules start at pixel 0
       let firstDarkEnd = 0;
       for (let x = 0; x < canvasW; x++) {
-        if (imgData.data[x * 4] > 128) { // found white after dark
+        if (imgData.data[x * 4] > 128) {
           firstDarkEnd = x;
           break;
         }
       }
-      // The top-left finder pattern outer row is 7 modules of dark pixels
       const modulePixels = Math.max(1, Math.round(firstDarkEnd / 7));
       const moduleCount = Math.round(canvasW / modulePixels);
 
-      // Use higher resolution for dense QR codes
+      // Re-render at higher resolution for accurate pixel sampling
       const hiddenSize = Math.max(200, moduleCount * 4);
-      const qr2 = new window.QRious({
+      new window.QRious({
         element: hiddenCanvas,
         value: text,
         size: hiddenSize,
         padding: 0,
         background: 'white',
         foreground: 'black',
-        level: 'Q'
+        level: ecLevel
       });
       const hiddenCtx2 = hiddenCanvas.getContext('2d');
       const imgData2 = hiddenCtx2.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
       const canvasW2 = hiddenCanvas.width;
       const modulePixels2 = canvasW2 / moduleCount;
 
-      // Build boolean grid from higher-res render
+      // Build boolean grid
       const grid = [];
       for (let row = 0; row < moduleCount; row++) {
         grid[row] = [];
@@ -228,10 +230,11 @@ const QRCodeGenerator = () => {
           const cx = padding + col * modSize + modSize / 2;
           const cy = padding + row * modSize + modSize / 2;
 
-          // Skip center area for logo
+          // Skip center area for logo — scale down for dense QR codes
           const centerX = size / 2;
           const centerY = size / 2;
-          const logoRadius = size * 0.15;
+          const logoFactor = moduleCount > 40 ? 0.10 : moduleCount > 30 ? 0.12 : 0.15;
+          const logoRadius = size * logoFactor;
           const dist = Math.sqrt((cx - centerX) ** 2 + (cy - centerY) ** 2);
           if (dist < logoRadius + modSize) continue;
 
@@ -303,8 +306,9 @@ const QRCodeGenerator = () => {
         }
       }
 
-      // Logo overlay in center
-      const logoSize = size * 0.22;
+      // Logo overlay — smaller for dense QR codes
+      const logoScale = moduleCount > 40 ? 0.15 : moduleCount > 30 ? 0.18 : 0.22;
+      const logoSize = size * logoScale;
       const logoX = (size - logoSize) / 2;
       const logoY = (size - logoSize) / 2;
 
@@ -417,16 +421,16 @@ const QRCodeGenerator = () => {
   };
 
   const generateVCard = (contact) => {
-    const vcard = `BEGIN:VCARD
-VERSION:3.0
-FN:${contact.firstName} ${contact.lastName}
-N:${contact.lastName};${contact.firstName};;;
-ORG:${contact.organization}
-TEL:${contact.phone}
-EMAIL:${contact.email}
-URL:${contact.url}
-END:VCARD`;
-    return vcard;
+    const lines = ['BEGIN:VCARD', 'VERSION:3.0'];
+    const fullName = `${contact.firstName} ${contact.lastName}`.trim();
+    if (fullName) lines.push(`FN:${fullName}`);
+    if (contact.lastName || contact.firstName) lines.push(`N:${contact.lastName};${contact.firstName};;;`);
+    if (contact.organization) lines.push(`ORG:${contact.organization}`);
+    if (contact.phone) lines.push(`TEL:${contact.phone}`);
+    if (contact.email) lines.push(`EMAIL:${contact.email}`);
+    if (contact.url) lines.push(`URL:${contact.url}`);
+    lines.push('END:VCARD');
+    return lines.join('\n');
   };
 
   useEffect(() => {
