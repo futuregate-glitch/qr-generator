@@ -93,6 +93,7 @@ const QRCodeGenerator = () => {
   const [activeTab, setActiveTab] = useState('url');
   const [qrData, setQrData] = useState('');
   const [copied, setCopied] = useState(false);
+  const [qrStyle, setQrStyle] = useState('dots');
   const qrContainerRef = useRef(null);
   
   // Form states for different types
@@ -107,6 +108,18 @@ const QRCodeGenerator = () => {
     url: ''
   });
 
+  const logoRef = useRef(null);
+
+  // Preload logo image
+  useEffect(() => {
+    const img = new Image();
+    img.src = process.env.PUBLIC_URL + '/Logo1.png';
+    img.onload = () => { logoRef.current = img; };
+  }, []);
+
+  const BRAND_COLOR = '#1A7AB5';
+  const BRAND_COLOR_DARK = '#145F8E';
+
   // QR Code generation using QRious library via CDN
   const generateQRCode = async (text) => {
     if (!text.trim()) {
@@ -117,78 +130,280 @@ const QRCodeGenerator = () => {
     }
 
     try {
-      // Load QRious library dynamically
       if (!window.QRious) {
         const script = document.createElement('script');
         script.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js';
-        script.onload = () => {
-          createQR(text);
-        };
+        script.onload = () => { createQR(text); };
         document.head.appendChild(script);
       } else {
         createQR(text);
       }
     } catch (error) {
       console.error('Error loading QR library:', error);
-      // Fallback to Google Charts API
-      generateFallbackQR(text);
     }
   };
 
   const createQR = (text) => {
     if (!qrContainerRef.current) return;
-    
+
     try {
-      // Clear previous QR code
       qrContainerRef.current.innerHTML = '';
-      
-      // Create canvas element
-      const canvas = document.createElement('canvas');
-      qrContainerRef.current.appendChild(canvas);
-      
-      // Generate QR code
+
+      // Generate QR using QRious to get module data
+      const hiddenCanvas = document.createElement('canvas');
       const qr = new window.QRious({
-        element: canvas,
+        element: hiddenCanvas,
         value: text,
-        size: 300,
+        size: 100,
+        padding: 0,
         background: 'white',
         foreground: 'black',
-        level: 'M'
+        level: 'Q'
       });
-      
-      // Style the canvas
-      canvas.className = 'w-full h-auto rounded-xl shadow-lg bg-white';
-      canvas.style.maxWidth = '300px';
+
+      // Read pixel data to extract module grid
+      const hiddenCtx = hiddenCanvas.getContext('2d');
+      const imgData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+      const canvasW = hiddenCanvas.width;
+
+      // Detect module count by finding the first dark run length in top row
+      // QRious with padding:0 means modules start at pixel 0
+      let firstDarkEnd = 0;
+      for (let x = 0; x < canvasW; x++) {
+        if (imgData.data[x * 4] > 128) { // found white after dark
+          firstDarkEnd = x;
+          break;
+        }
+      }
+      // The top-left finder pattern outer row is 7 modules of dark pixels
+      const modulePixels = Math.max(1, Math.round(firstDarkEnd / 7));
+      const moduleCount = Math.round(canvasW / modulePixels);
+
+      // Use higher resolution for dense QR codes
+      const hiddenSize = Math.max(200, moduleCount * 4);
+      const qr2 = new window.QRious({
+        element: hiddenCanvas,
+        value: text,
+        size: hiddenSize,
+        padding: 0,
+        background: 'white',
+        foreground: 'black',
+        level: 'Q'
+      });
+      const hiddenCtx2 = hiddenCanvas.getContext('2d');
+      const imgData2 = hiddenCtx2.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+      const canvasW2 = hiddenCanvas.width;
+      const modulePixels2 = canvasW2 / moduleCount;
+
+      // Build boolean grid from higher-res render
+      const grid = [];
+      for (let row = 0; row < moduleCount; row++) {
+        grid[row] = [];
+        for (let col = 0; col < moduleCount; col++) {
+          const px = Math.floor(col * modulePixels2 + modulePixels2 / 2);
+          const py = Math.floor(row * modulePixels2 + modulePixels2 / 2);
+          const idx = (py * canvasW2 + px) * 4;
+          grid[row][col] = imgData2.data[idx] < 128;
+        }
+      }
+
+      // Draw styled QR code on a high-res canvas
+      const size = 1000;
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, size, size);
+
+      const padding = 24;
+      const qrSize = size - padding * 2;
+      const modSize = qrSize / moduleCount;
+
+      for (let row = 0; row < moduleCount; row++) {
+        for (let col = 0; col < moduleCount; col++) {
+          if (!grid[row][col]) continue;
+
+          const cx = padding + col * modSize + modSize / 2;
+          const cy = padding + row * modSize + modSize / 2;
+
+          // Skip center area for logo
+          const centerX = size / 2;
+          const centerY = size / 2;
+          const logoRadius = size * 0.15;
+          const dist = Math.sqrt((cx - centerX) ** 2 + (cy - centerY) ** 2);
+          if (dist < logoRadius + modSize) continue;
+
+          // Color gradient based on distance
+          const maxDist = Math.sqrt(2) * size / 2;
+          const ratio = dist / maxDist;
+          ctx.fillStyle = lerpColor(BRAND_COLOR, BRAND_COLOR_DARK, ratio);
+
+          const isFinder = isFinderPattern(row, col, moduleCount);
+
+          switch (qrStyle) {
+            case 'dots':
+              if (isFinder) {
+                drawRoundedSquare(ctx, cx, cy, modSize * 0.9, modSize * 0.2);
+              } else {
+                ctx.beginPath();
+                ctx.arc(cx, cy, modSize * 0.38, 0, Math.PI * 2);
+                ctx.fill();
+              }
+              break;
+
+            case 'rounded':
+              drawRoundedSquare(ctx, cx, cy, modSize * 0.88, modSize * 0.3);
+              break;
+
+            case 'classic':
+              ctx.fillRect(cx - modSize * 0.45, cy - modSize * 0.45, modSize * 0.9, modSize * 0.9);
+              break;
+
+            case 'diamond':
+              if (isFinder) {
+                drawRoundedSquare(ctx, cx, cy, modSize * 0.9, modSize * 0.15);
+              } else {
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.rotate(Math.PI / 4);
+                ctx.fillRect(-modSize * 0.3, -modSize * 0.3, modSize * 0.6, modSize * 0.6);
+                ctx.restore();
+              }
+              break;
+
+            case 'star':
+              if (isFinder) {
+                drawRoundedSquare(ctx, cx, cy, modSize * 0.9, modSize * 0.2);
+              } else {
+                drawStar(ctx, cx, cy, modSize * 0.2, modSize * 0.4, 4);
+              }
+              break;
+
+            case 'stripe':
+              if (isFinder) {
+                drawRoundedSquare(ctx, cx, cy, modSize * 0.9, modSize * 0.2);
+              } else {
+                // Horizontal pill shape - connect with neighbors
+                const hasRight = col + 1 < moduleCount && grid[row][col + 1];
+                const w = hasRight ? modSize * 1.0 : modSize * 0.7;
+                const offsetX = hasRight ? modSize * 0.05 : 0;
+                const h = modSize * 0.5;
+                const r = h / 2;
+                drawPill(ctx, cx + offsetX - w / 2, cy - h / 2, w, h, r);
+              }
+              break;
+
+            default:
+              ctx.beginPath();
+              ctx.arc(cx, cy, modSize * 0.38, 0, Math.PI * 2);
+              ctx.fill();
+          }
+        }
+      }
+
+      // Logo overlay in center
+      const logoSize = size * 0.22;
+      const logoX = (size - logoSize) / 2;
+      const logoY = (size - logoSize) / 2;
+
+      // White circle behind logo
+      ctx.fillStyle = '#FFFFFF';
+      ctx.beginPath();
+      ctx.arc(size / 2, size / 2, logoSize / 2 + 8, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (logoRef.current) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(size / 2, size / 2, logoSize / 2, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(logoRef.current, logoX, logoY, logoSize, logoSize);
+        ctx.restore();
+      }
+
+      canvas.className = 'w-full h-auto rounded-2xl bg-white';
+      canvas.style.maxWidth = '100%';
       canvas.style.height = 'auto';
-      
+      qrContainerRef.current.appendChild(canvas);
+
     } catch (error) {
       console.error('Error creating QR code:', error);
-      generateFallbackQR(text);
     }
   };
 
-  const generateFallbackQR = (text) => {
-    if (!qrContainerRef.current) return;
-    
-    // Clear previous content
-    qrContainerRef.current.innerHTML = '';
-    
-    // Create img element for fallback
-    const img = document.createElement('img');
-    const encodedData = encodeURIComponent(text);
-    img.src = `https://chart.googleapis.com/chart?chs=300x300&cht=qr&chl=${encodedData}&choe=UTF-8`;
-    img.alt = t('qrCodeAlt');
-    img.className = 'w-full h-auto rounded-xl shadow-lg bg-white p-4';
-    img.style.maxWidth = '300px';
-    img.style.height = 'auto';
-    
-    // Add error handling for the fallback image
-    img.onerror = () => {
-      // If Google Charts also fails, try QR Server API
-      img.src = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodedData}&format=png&margin=10`;
-    };
-    
-    qrContainerRef.current.appendChild(img);
+  const isFinderPattern = (row, col, moduleCount) => {
+    // Top-left, top-right, bottom-left finder patterns (7x7 modules)
+    return (row < 7 && col < 7) ||
+           (row < 7 && col >= moduleCount - 7) ||
+           (row >= moduleCount - 7 && col < 7);
+  };
+
+  const drawRoundedSquare = (ctx, cx, cy, size, radius) => {
+    const half = size / 2;
+    const x = cx - half;
+    const y = cy - half;
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + size - radius, y);
+    ctx.quadraticCurveTo(x + size, y, x + size, y + radius);
+    ctx.lineTo(x + size, y + size - radius);
+    ctx.quadraticCurveTo(x + size, y + size, x + size - radius, y + size);
+    ctx.lineTo(x + radius, y + size);
+    ctx.quadraticCurveTo(x, y + size, x, y + size - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+    ctx.fill();
+  };
+
+  const drawStar = (ctx, cx, cy, innerR, outerR, points) => {
+    ctx.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const r = i % 2 === 0 ? outerR : innerR;
+      const angle = (Math.PI * i) / points - Math.PI / 2;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+  };
+
+  const drawPill = (ctx, x, y, w, h, r) => {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill();
+  };
+
+  const lerpColor = (color1, color2, t) => {
+    const c1 = hexToRgb(color1);
+    const c2 = hexToRgb(color2);
+    const r = Math.round(c1.r + (c2.r - c1.r) * t);
+    const g = Math.round(c1.g + (c2.g - c1.g) * t);
+    const b = Math.round(c1.b + (c2.b - c1.b) * t);
+    return `rgb(${r},${g},${b})`;
+  };
+
+  const hexToRgb = (hex) => {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result ? {
+      r: parseInt(result[1], 16),
+      g: parseInt(result[2], 16),
+      b: parseInt(result[3], 16)
+    } : { r: 0, g: 0, b: 0 };
   };
 
   const formatUrl = (url) => {
@@ -235,7 +450,7 @@ END:VCARD`;
     
     setQrData(data);
     generateQRCode(data);
-  }, [activeTab, urlInput, textInput, contactInfo]);
+  }, [activeTab, urlInput, textInput, contactInfo, qrStyle]);
 
   const downloadQRCode = () => {
     if (!qrData) return;
@@ -294,13 +509,13 @@ END:VCARD`;
   ];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-indigo-100 p-4">
+    <div className="min-h-screen bg-gradient-to-br from-sky-50 via-blue-50 to-cyan-100 p-4">
       <div className="max-w-4xl mx-auto">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-r from-purple-600 to-blue-600 rounded-2xl mb-4">
-            <QrCode className="w-8 h-8 text-white" />
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl mb-4 overflow-hidden">
+            <img src={process.env.PUBLIC_URL + '/Logo1.png'} alt="Logo" className="w-14 h-14 object-contain" />
           </div>
-          <h1 className="text-4xl font-bold bg-gradient-to-r from-purple-600 to-blue-600 bg-clip-text text-transparent mb-2">
+          <h1 className="text-4xl font-bold bg-gradient-to-r from-[#1A7AB5] to-[#145F8E] bg-clip-text text-transparent mb-2">
             {t('appTitle')}
           </h1>
           <p className="text-gray-600 text-lg">{t('appDescription')}</p>
@@ -318,7 +533,7 @@ END:VCARD`;
                     onClick={() => setActiveTab(tab.id)}
                     className={`flex-1 flex items-center justify-center gap-2 px-6 py-4 text-sm font-medium transition-all duration-200 ${
                       activeTab === tab.id
-                        ? 'text-purple-600 border-b-2 border-purple-600 bg-purple-50'
+                        ? 'text-[#1A7AB5] border-b-2 border-[#1A7AB5] bg-blue-50'
                         : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
                     }`}
                   >
@@ -351,7 +566,7 @@ END:VCARD`;
                       value={urlInput}
                       onChange={(e) => setUrlInput(e.target.value)}
                       placeholder={t('urlPlaceholder')}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#1A7AB5] focus:border-transparent transition-all duration-200"
                     />
                     <p className="text-xs text-gray-500 mt-1">
                       {t('urlHelp')}
@@ -370,7 +585,7 @@ END:VCARD`;
                       onChange={(e) => setTextInput(e.target.value)}
                       placeholder={t('textPlaceholder')}
                       rows={4}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200 resize-none"
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#1A7AB5] focus:border-transparent transition-all duration-200 resize-none"
                     />
                   </div>
                 )}
@@ -388,7 +603,7 @@ END:VCARD`;
                           value={contactInfo.firstName}
                           onChange={(e) => setContactInfo({...contactInfo, firstName: e.target.value})}
                           placeholder={t('firstNamePlaceholder')}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#1A7AB5] focus:border-transparent transition-all duration-200"
                         />
                       </div>
                       <div>
@@ -400,7 +615,7 @@ END:VCARD`;
                           value={contactInfo.lastName}
                           onChange={(e) => setContactInfo({...contactInfo, lastName: e.target.value})}
                           placeholder={t('lastNamePlaceholder')}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#1A7AB5] focus:border-transparent transition-all duration-200"
                         />
                       </div>
                     </div>
@@ -414,7 +629,7 @@ END:VCARD`;
                         value={contactInfo.phone}
                         onChange={(e) => setContactInfo({...contactInfo, phone: e.target.value})}
                         placeholder={t('phonePlaceholder')}
-                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#1A7AB5] focus:border-transparent transition-all duration-200"
                       />
                     </div>
                     
@@ -427,7 +642,7 @@ END:VCARD`;
                         value={contactInfo.email}
                         onChange={(e) => setContactInfo({...contactInfo, email: e.target.value})}
                         placeholder={t('emailPlaceholder')}
-                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#1A7AB5] focus:border-transparent transition-all duration-200"
                       />
                     </div>
                     
@@ -440,7 +655,7 @@ END:VCARD`;
                         value={contactInfo.organization}
                         onChange={(e) => setContactInfo({...contactInfo, organization: e.target.value})}
                         placeholder={t('organizationPlaceholder')}
-                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#1A7AB5] focus:border-transparent transition-all duration-200"
                       />
                     </div>
                     
@@ -453,7 +668,7 @@ END:VCARD`;
                         value={contactInfo.url}
                         onChange={(e) => setContactInfo({...contactInfo, url: e.target.value})}
                         placeholder={t('websitePlaceholder')}
-                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#1A7AB5] focus:border-transparent transition-all duration-200"
                       />
                     </div>
                   </div>
@@ -470,6 +685,34 @@ END:VCARD`;
               {/* QR Code Display Section */}
               <div className="flex flex-col items-center space-y-6">
                 <h2 className="text-2xl font-semibold text-gray-800">{t('generatedQrCode')}</h2>
+
+                {/* Style Picker */}
+                <div className="w-full max-w-sm">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">QR Style</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: 'dots', label: 'Dots', icon: '●' },
+                      { id: 'rounded', label: 'Rounded', icon: '▢' },
+                      { id: 'classic', label: 'Classic', icon: '■' },
+                      { id: 'diamond', label: 'Diamond', icon: '◆' },
+                      { id: 'star', label: 'Star', icon: '✦' },
+                      { id: 'stripe', label: 'Stripe', icon: '━' },
+                    ].map((style) => (
+                      <button
+                        key={style.id}
+                        onClick={() => setQrStyle(style.id)}
+                        className={`flex flex-col items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200 border-2 ${
+                          qrStyle === style.id
+                            ? 'border-[#1A7AB5] bg-blue-50 text-[#1A7AB5]'
+                            : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        <span className="text-lg">{style.icon}</span>
+                        <span>{style.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 
                 <div className="bg-gray-50 rounded-2xl p-8 w-full max-w-sm">
                   {qrData ? (
@@ -495,7 +738,7 @@ END:VCARD`;
                   <div className="flex gap-4 w-full max-w-sm">
                     <button
                       onClick={downloadQRCode}
-                      className="flex-1 flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-xl hover:from-purple-700 hover:to-blue-700 transition-all duration-200 font-medium shadow-lg"
+                      className="flex-1 flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-[#1A7AB5] to-[#145F8E] text-white rounded-xl hover:from-[#145F8E] hover:to-[#0F4A6E] transition-all duration-200 font-medium shadow-lg"
                     >
                       <Download className="w-4 h-4" />
                       {t('download')}
